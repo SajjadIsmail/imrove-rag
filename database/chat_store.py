@@ -5,16 +5,18 @@ from bson import ObjectId
 from config import settings  # Import the config module
 
 class ChatMessage:
-    def __init__(self, role: str, content: str, feedback: Optional[str] = None):
+    def __init__(self, role: str, content: str, feedback: Optional[str] = None, rating: Optional[int] = None):
         self.role = role
         self.content = content
         self.feedback = feedback
+        self.rating = rating
 
     def to_dict(self):
         return {
             "role": self.role,
             "content": self.content,
-            "feedback": self.feedback
+            "feedback": self.feedback,
+            "rating": self.rating
         }
 
     @classmethod
@@ -22,7 +24,8 @@ class ChatMessage:
         return cls(
             role=data["role"],
             content=data["content"],
-            feedback=data.get("feedback", None)
+            feedback=data.get("feedback"),
+            rating=data.get("rating")
         )
 
 class ChatSession:
@@ -49,8 +52,8 @@ class ChatSession:
             "messages": [msg.to_dict() for msg in self.messages],
             "document_id": self.document_id,
             "document_info": self.document_info,
-            "created_at": self.created_at.isoformat(),
-            "last_interaction_at": self.last_interaction_at.isoformat(),
+            "created_at": self.created_at.timestamp(),
+            "last_interaction_at": self.last_interaction_at.timestamp(),
             "title": self.title
         }
 
@@ -58,25 +61,10 @@ class ChatSession:
     def from_dict(cls, data):
         messages = [ChatMessage.from_dict(msg) for msg in data.get("messages", [])]
         
-        # Handle created_at that could be datetime or string
-        created_at = data.get("created_at")
-        if isinstance(created_at, str):
-            created_at = datetime.fromisoformat(created_at)
-        elif isinstance(created_at, datetime):
-            created_at = created_at
-        else:
-            created_at = None
+        created_at = cls._parse_datetime(data.get("created_at"))
+        last_interaction_at = cls._parse_datetime(data.get("last_interaction_at"), default=created_at)
 
-        # Handle last_interaction_at that could be datetime or string
-        last_interaction_at = data.get("last_interaction_at")
-        if isinstance(last_interaction_at, str):
-            last_interaction_at = datetime.fromisoformat(last_interaction_at)
-        elif isinstance(last_interaction_at, datetime):
-            last_interaction_at = last_interaction_at
-        else:
-            last_interaction_at = created_at  # Default to created_at if not present
-
-        session = cls(
+        return cls(
             id=str(data.get("_id", data.get("id"))),
             session_id=data.get("session_id"),
             user_id=data["user_id"],
@@ -85,10 +73,17 @@ class ChatSession:
             document_id=data.get("document_id"),
             document_info=data.get("document_info"),
             created_at=created_at,
-            last_interaction_at=last_interaction_at
+            last_interaction_at=last_interaction_at,
+            title=data.get("title", "new chat")
         )
-        session.title = data.get("title", f"new chat")
-        return session
+
+    @staticmethod
+    def _parse_datetime(value, default=None):
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        if isinstance(value, datetime):
+            return value
+        return default
 
 class ChatStore:
     def __init__(self):
@@ -115,29 +110,24 @@ class ChatStore:
         session_data = self.chat_sessions.find_one({"session_id": session_id, "user_id": user_id})
         return ChatSession.from_dict(session_data) if session_data else None
 
+    def get_session_by_document_id(self, user_id: str, document_id: str) -> Optional[ChatSession]:
+        session_data = self.chat_sessions.find_one({"document_id": document_id, "user_id": user_id})
+        return ChatSession.from_dict(session_data) if session_data else None
+
     def update_session_messages(self, session_id: str, all_messages: List[ChatMessage], title: str) -> bool:
-        """
-        Update a chat session with new messages while preserving existing ones
-        """
         last_interaction_at = datetime.utcnow()
 
-        # update the title if it is not empty
-        if title:
-            print(f"\n\n🔥updating title: {title} for session_id: {session_id}\n\n")
-            self.chat_sessions.update_one(
-                {"session_id": session_id},
-                {"$set": {"title": title}}
-            )
+        update_fields = {
+            "messages": [msg if isinstance(msg, dict) else msg.to_dict() for msg in all_messages],
+            "last_interaction_at": last_interaction_at
+        }
 
-        # Update in database
+        if title:
+            update_fields["title"] = title
+
         result = self.chat_sessions.update_one(
             {"session_id": session_id},
-            {
-                "$set": {
-                    "messages": all_messages,
-                    "last_interaction_at": last_interaction_at
-                }
-            }
+            {"$set": update_fields}
         )
         return result.modified_count > 0
 
@@ -148,31 +138,23 @@ class ChatStore:
         )
         return result.modified_count > 0
 
-    def get_user_sessions(self, user_id: str, limit: int = 10) -> List[ChatSession]:
-        """
-        Get user's chat sessions, sorted by last interaction (most recent first), only return the id,session_id, title, type and last_interaction_at
-        """
+    def get_user_sessions(self, user_id: str, limit: int = 10) -> List[Dict]:
         sessions_data = self.chat_sessions.find(
             {"user_id": user_id}
         ).sort("last_interaction_at", -1).limit(limit)
         
-        sessions = []
-        for session in sessions_data:
-            session['_id'] = str(session['_id'])
-            sessions.append({
-                "id": session['_id'],
+        return [
+            {
+                "id": str(session['_id']),
                 "session_id": session['session_id'],
                 "title": session['title'],
                 "type": session['type'],
                 "last_interaction_at": session['last_interaction_at']
-            })
-        
-        return sessions
+            }
+            for session in sessions_data
+        ]
 
-    def update_message_feedback(self, user_id: str, session_id: str, message_index: int, feedback: str) -> bool:
-        """
-        Update feedback string for a specific feedback in a message with index
-        """
+    def update_message_feedback(self, user_id: str, session_id: str, message_index: int, feedback: str, rating: int) -> bool:
         result = self.chat_sessions.update_one(
             {
                 "session_id": session_id,
@@ -180,7 +162,8 @@ class ChatStore:
             },
             {
                 "$set": {
-                    f"messages.{message_index}.feedback": feedback
+                    f"messages.{message_index}.feedback": feedback,
+                    f"messages.{message_index}.rating": rating
                 }
             }
         )

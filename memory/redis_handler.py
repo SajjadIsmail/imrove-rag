@@ -41,8 +41,6 @@ class RedisHandler:
         return json.loads(previous_info) if previous_info else {}
     
     def save_document_id(self, session_id: str, document_id: str):
-        print(f"document_id: {document_id} is saved in redis")
-        print(f"session_id: {session_id} is saved in redis")
         self.redis_client.setex(
             f"document_id:{session_id}",
             3600,  # 1 hour expiry

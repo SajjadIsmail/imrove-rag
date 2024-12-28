@@ -17,7 +17,6 @@ class VectorStore:
         if not document_id:
             raise ValueError("document_id cannot be None or empty")
             
-        print("document is pushed to vector store")
         text_content = json.dumps(document_info)
         self.collection.add(
             documents=[text_content],
